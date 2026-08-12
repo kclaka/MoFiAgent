@@ -1,0 +1,15 @@
+.gcloudignore
+.git/
+.venv/
+.terraform/
+**/.terraform/
+.env
+.env.*
+!.env.example
+.coverage
+htmlcov/
+__pycache__/
+*.pyc
+*.tfplan
+*.tfstate
+*.tfstate.*

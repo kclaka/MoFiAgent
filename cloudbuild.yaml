@@ -1,0 +1,21 @@
+steps:
+  - id: build-release-image
+    name: gcr.io/cloud-builders/docker@sha256:617f98016081e2978c0b44184d7b09446027b909f1078b8fdc23efc4c74c5f20
+    args:
+      - build
+      - --pull
+      - --tag
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/mofiagent:${BUILD_ID}
+      - .
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/mofiagent:${BUILD_ID}
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _REGION: us-east1
+  _REPOSITORY: mofiagent
+
+timeout: 1200s

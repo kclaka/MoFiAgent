@@ -1,0 +1,21 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.29.0-pg17@sha256:3e65c273cbf7218f2a28692492b4625b49f35c7d2142e945561ef52311a8c83a
+    environment:
+      POSTGRES_DB: mofiagent
+      POSTGRES_USER: mofiagent
+      POSTGRES_PASSWORD: mofiagent
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mofiagent -d mofiagent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  timescale-data:

@@ -1,0 +1,3 @@
+project_id        = "modern-fi"
+region            = "us-east1"
+state_bucket_name = "modern-fi-mofiagent-tfstate"

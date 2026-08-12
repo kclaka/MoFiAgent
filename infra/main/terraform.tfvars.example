@@ -1,0 +1,11 @@
+project_id        = "modern-fi"
+region            = "us-east1"
+zone              = "us-east1-b"
+vertex_location   = "us"
+vertex_model      = "gemini-3.5-flash"
+application_image = "us-east1-docker.pkg.dev/modern-fi/mofiagent/mofiagent@sha256:REPLACE_WITH_64_HEX_CHARACTERS"
+
+snapshot_retention_days = 30
+
+admin_secret_version_generation   = 1
+runtime_secret_version_generation = 1
