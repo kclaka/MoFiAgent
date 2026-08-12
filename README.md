@@ -63,8 +63,6 @@ curl --fail-with-body \
 - The database disk has deletion protection and daily snapshots retained for 30 days.
 - Application, TimescaleDB, Python, uv, and Terraform provider versions are locked or digest-pinned.
 
-## Documentation
+## Project plan
 
 - [Implementation plan](IMPLEMENTATION_PLAN.md)
-- [Architecture decision log](docs/DECISIONS.md)
-- [Deployment and operations runbook](docs/OPERATIONS.md)
