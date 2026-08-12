@@ -65,6 +65,12 @@ variable "db_disk_size_gb" {
   }
 }
 
+variable "database_deletion_protection" {
+  description = "Protect the database VM from deletion; set false only in a reviewed two-phase replacement workflow."
+  type        = bool
+  default     = true
+}
+
 variable "snapshot_retention_days" {
   description = "Maximum retention for daily database disk snapshots."
   type        = number

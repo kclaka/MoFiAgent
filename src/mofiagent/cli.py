@@ -37,6 +37,8 @@ def _database_from_settings() -> Database:
         min_size=settings.db_pool_min_size,
         max_size=settings.db_pool_max_size,
         timeout_seconds=settings.db_pool_timeout_seconds,
+        connect_timeout_seconds=settings.db_connect_timeout_seconds,
+        startup_timeout_seconds=settings.db_startup_timeout_seconds,
     )
 
 
@@ -47,6 +49,8 @@ async def _run_migrations() -> None:
     applied = await apply_migrations(
         settings.database_dsn.get_secret_value(),
         settings.migrations_dir,
+        connect_timeout_seconds=settings.db_connect_timeout_seconds,
+        startup_timeout_seconds=settings.db_startup_timeout_seconds,
     )
     if applied:
         print(f"Applied {len(applied)} migration(s): {', '.join(applied)}")

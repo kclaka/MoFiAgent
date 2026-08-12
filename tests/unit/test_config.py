@@ -9,6 +9,8 @@ def test_defaults_are_bounded() -> None:
     assert settings.port == 8080
     assert settings.max_agent_rounds == 4
     assert settings.db_pool_max_size == 4
+    assert settings.db_connect_timeout_seconds == 5
+    assert settings.db_startup_timeout_seconds == 30
     assert settings.google_cloud_location == "us"
     assert settings.vertex_model == "gemini-3.5-flash"
 

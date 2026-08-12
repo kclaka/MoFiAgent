@@ -17,6 +17,10 @@ resource "google_cloud_run_v2_service" "api" {
   deletion_protection = false
 
   template {
+    labels = {
+      database_config = substr(filesha256("${path.module}/templates/database-startup.sh.tftpl"), 0, 12)
+    }
+
     service_account                  = google_service_account.api.email
     timeout                          = "30s"
     max_instance_request_concurrency = 8
@@ -54,9 +58,11 @@ resource "google_cloud_run_v2_service" "api" {
 
       dynamic "env" {
         for_each = merge(local.common_environment, {
-          MOFI_DB_POOL_MIN_SIZE = "1"
-          MOFI_DB_POOL_MAX_SIZE = "4"
-          MOFI_MAX_AGENT_ROUNDS = "4"
+          MOFI_DB_POOL_MIN_SIZE           = "1"
+          MOFI_DB_POOL_MAX_SIZE           = "4"
+          MOFI_DB_CONNECT_TIMEOUT_SECONDS = "10"
+          MOFI_DB_STARTUP_TIMEOUT_SECONDS = "120"
+          MOFI_MAX_AGENT_ROUNDS           = "4"
         })
         content {
           name  = env.key
@@ -80,7 +86,7 @@ resource "google_cloud_run_v2_service" "api" {
         period_seconds        = 5
         failure_threshold     = 30
         http_get {
-          path = "/healthz"
+          path = "/health"
           port = 8080
         }
       }
@@ -91,7 +97,7 @@ resource "google_cloud_run_v2_service" "api" {
         period_seconds        = 10
         failure_threshold     = 3
         http_get {
-          path = "/healthz"
+          path = "/health"
           port = 8080
         }
       }
@@ -163,6 +169,14 @@ resource "google_cloud_run_v2_job" "migrate" {
           name  = "MOFI_MIGRATIONS_DIR"
           value = "/app/migrations"
         }
+        env {
+          name  = "MOFI_DB_CONNECT_TIMEOUT_SECONDS"
+          value = "10"
+        }
+        env {
+          name  = "MOFI_DB_STARTUP_TIMEOUT_SECONDS"
+          value = "120"
+        }
       }
     }
   }
@@ -212,11 +226,13 @@ resource "google_cloud_run_v2_job" "ingest" {
 
         dynamic "env" {
           for_each = {
-            MOFI_ENVIRONMENT             = "production"
-            MOFI_LOG_LEVEL               = "INFO"
-            MOFI_DB_POOL_MIN_SIZE        = "1"
-            MOFI_DB_POOL_MAX_SIZE        = "2"
-            MOFI_REQUEST_TIMEOUT_SECONDS = "20"
+            MOFI_ENVIRONMENT                = "production"
+            MOFI_LOG_LEVEL                  = "INFO"
+            MOFI_DB_POOL_MIN_SIZE           = "1"
+            MOFI_DB_POOL_MAX_SIZE           = "2"
+            MOFI_DB_CONNECT_TIMEOUT_SECONDS = "10"
+            MOFI_DB_STARTUP_TIMEOUT_SECONDS = "120"
+            MOFI_REQUEST_TIMEOUT_SECONDS    = "20"
           }
           content {
             name  = env.key

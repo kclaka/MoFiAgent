@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     db_pool_min_size: int = Field(default=1, ge=0, le=10)
     db_pool_max_size: int = Field(default=4, ge=1, le=20)
     db_pool_timeout_seconds: PositiveFloat = 5.0
+    db_connect_timeout_seconds: PositiveFloat = 5.0
+    db_startup_timeout_seconds: PositiveFloat = 30.0
 
     google_cloud_project: str | None = None
     google_cloud_location: str = "us"

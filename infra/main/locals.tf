@@ -19,8 +19,6 @@ locals {
 
   required_apis = toset([
     "aiplatform.googleapis.com",
-    "artifactregistry.googleapis.com",
-    "cloudbuild.googleapis.com",
     "cloudscheduler.googleapis.com",
     "compute.googleapis.com",
     "iam.googleapis.com",
@@ -29,6 +27,5 @@ locals {
     "monitoring.googleapis.com",
     "run.googleapis.com",
     "secretmanager.googleapis.com",
-    "serviceusage.googleapis.com",
   ])
 }

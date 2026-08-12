@@ -67,7 +67,7 @@ resource "google_compute_instance" "database" {
   machine_type              = var.db_machine_type
   allow_stopping_for_update = true
   can_ip_forward            = false
-  deletion_protection       = true
+  deletion_protection       = var.database_deletion_protection
   tags                      = ["${local.name}-database"]
 
   boot_disk {
@@ -109,6 +109,7 @@ resource "google_compute_instance" "database" {
     data_mount                = "/mnt/disks/${local.name}-data"
     database_name             = local.database_name
     database_port             = local.database_port
+    serverless_subnet_cidr    = local.serverless_subnet_cidr
     admin_user                = local.database_users.admin
     api_user                  = local.database_users.api
     ingest_user               = local.database_users.ingest

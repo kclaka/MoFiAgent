@@ -1,7 +1,9 @@
+import asyncio
 import hashlib
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from time import monotonic
 from typing import Any, LiteralString, cast
 
 import psycopg
@@ -25,7 +27,10 @@ class Database:
         min_size: int,
         max_size: int,
         timeout_seconds: float,
+        connect_timeout_seconds: float = 5.0,
+        startup_timeout_seconds: float = 30.0,
     ) -> None:
+        self._startup_timeout_seconds = startup_timeout_seconds
         self._pool = AsyncConnectionPool[AsyncConnection[dict[str, Any]]](
             conninfo=dsn,
             min_size=min_size,
@@ -36,14 +41,14 @@ class Database:
             kwargs={
                 "autocommit": False,
                 "row_factory": dict_row,
-                "connect_timeout": max(1, int(timeout_seconds)),
+                "connect_timeout": max(1, int(connect_timeout_seconds)),
             },
             check=_check_connection,
             name="mofiagent",
         )
 
     async def open(self) -> None:
-        await self._pool.open(wait=True)
+        await self._pool.open(wait=True, timeout=self._startup_timeout_seconds)
 
     async def close(self) -> None:
         await self._pool.close()
@@ -64,11 +69,45 @@ def _migration_files(migrations_dir: Path) -> list[Path]:
     return migration_files
 
 
-async def apply_migrations(dsn: str, migrations_dir: Path) -> list[str]:
+async def connect_with_retry(
+    dsn: str,
+    *,
+    connect_timeout_seconds: float,
+    startup_timeout_seconds: float,
+) -> AsyncConnection[Any]:
+    deadline = monotonic() + startup_timeout_seconds
+    delay_seconds = 1.0
+    while True:
+        try:
+            return await psycopg.AsyncConnection.connect(
+                dsn,
+                autocommit=False,
+                connect_timeout=max(1, int(connect_timeout_seconds)),
+            )
+        except psycopg.OperationalError:
+            remaining_seconds = deadline - monotonic()
+            if remaining_seconds <= 0:
+                raise
+            await asyncio.sleep(min(delay_seconds, remaining_seconds))
+            delay_seconds = min(delay_seconds * 2, 10.0)
+
+
+async def apply_migrations(
+    dsn: str,
+    migrations_dir: Path,
+    *,
+    connect_timeout_seconds: float = 5.0,
+    startup_timeout_seconds: float = 30.0,
+) -> list[str]:
     """Apply immutable SQL migrations exactly once under an advisory lock."""
 
     applied: list[str] = []
-    async with await psycopg.AsyncConnection.connect(dsn, autocommit=False) as connection:
+    connection = await connect_with_retry(
+        dsn,
+        connect_timeout_seconds=connect_timeout_seconds,
+        startup_timeout_seconds=startup_timeout_seconds,
+    )
+    async with connection:
         await connection.execute("SELECT pg_advisory_xact_lock(%s)", (739_104_221,))
         await connection.execute(
             """

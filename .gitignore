@@ -14,7 +14,7 @@ __pycache__/
 build/
 dist/
 htmlcov/
-.coverage
+.coverage*
 .terraform/
 **/backend.hcl
 infra/bootstrap/backend.tf

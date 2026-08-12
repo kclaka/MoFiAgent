@@ -71,6 +71,8 @@ def create_app(
             min_size=settings.db_pool_min_size,
             max_size=settings.db_pool_max_size,
             timeout_seconds=settings.db_pool_timeout_seconds,
+            connect_timeout_seconds=settings.db_connect_timeout_seconds,
+            startup_timeout_seconds=settings.db_startup_timeout_seconds,
         )
         await database.open()
         repository = RateRepository(database)
@@ -107,7 +109,7 @@ def create_app(
         app.state.question_service = question_service
 
     app.add_api_route(
-        "/healthz",
+        "/health",
         health,
         methods=["GET"],
         response_model=HealthResponse,
