@@ -4,13 +4,14 @@ from typing import Protocol, cast
 from google import genai
 from google.genai import types
 
-from mofiagent.agent.models import ModelToolCall, ModelTurn, ToolResult
+from mofiagent.agent.models import ConversationExchange, ModelToolCall, ModelTurn, ToolResult
 
 SYSTEM_INSTRUCTION = """You are MoFiAgent, a concise U.S. Treasury yield assistant.
 
 Rules:
 - Use the provided tools for every factual or numerical rate answer.
 - Never answer a rate from memory.
+- Resolve follow-up references such as "that yield" from the supplied conversation history.
 - The tools return percentages, dates, basis-point changes, and authoritative source URLs.
 - Preserve every number exactly. Do not calculate or interpolate values yourself.
 - If a date has no observation, explain that the tool returned the latest prior business-day value.
@@ -30,7 +31,7 @@ class ModelGateway(Protocol):
     @property
     def model_name(self) -> str: ...
 
-    def create_session(self) -> ModelSession: ...
+    def create_session(self, history: Sequence[ConversationExchange]) -> ModelSession: ...
 
 
 class AsyncChat(Protocol):
@@ -57,6 +58,19 @@ class VertexModelSession:
         ]
         response = await self._chat.send_message(parts)
         return model_turn_from_response(response)
+
+
+def chat_history_from(
+    history: Sequence[ConversationExchange],
+) -> list[types.ContentOrDict]:
+    return [
+        content
+        for exchange in history
+        for content in (
+            types.Content(role="user", parts=[types.Part(text=exchange.question)]),
+            types.Content(role="model", parts=[types.Part(text=exchange.answer)]),
+        )
+    ]
 
 
 class VertexModelGateway:
@@ -98,8 +112,12 @@ class VertexModelGateway:
     def model_name(self) -> str:
         return self._model_name
 
-    def create_session(self) -> ModelSession:
-        chat = self._client.aio.chats.create(model=self._model_name, config=self._config)
+    def create_session(self, history: Sequence[ConversationExchange]) -> ModelSession:
+        chat = self._client.aio.chats.create(
+            model=self._model_name,
+            config=self._config,
+            history=chat_history_from(history),
+        )
         return VertexModelSession(cast(AsyncChat, chat))
 
 

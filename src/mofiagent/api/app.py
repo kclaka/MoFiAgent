@@ -2,6 +2,7 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Protocol, runtime_checkable
+from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request, status
 
@@ -13,7 +14,13 @@ from mofiagent.api.models import HealthResponse, QuestionRequest, QuestionRespon
 from mofiagent.application import QuestionProcessingError, QuestionService
 from mofiagent.config import get_settings
 from mofiagent.database import Database
-from mofiagent.rates.repository import InteractionRepository, RateRepository
+from mofiagent.rates.repository import (
+    ConversationRepository,
+    RateRepository,
+    SessionBusyError,
+    SessionLeaseLostError,
+    SessionNotFoundError,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -24,7 +31,12 @@ async def health() -> HealthResponse:
 
 @runtime_checkable
 class QuestionAnswerer(Protocol):
-    async def answer(self, question: str) -> QuestionResponse: ...
+    async def answer(
+        self,
+        question: str,
+        *,
+        session_id: UUID | None = None,
+    ) -> QuestionResponse: ...
 
 
 def _question_service(request: Request) -> QuestionAnswerer:
@@ -39,7 +51,20 @@ def _question_service(request: Request) -> QuestionAnswerer:
 
 async def answer_question(request: Request, body: QuestionRequest) -> QuestionResponse:
     try:
-        return await _question_service(request).answer(body.question)
+        return await _question_service(request).answer(
+            body.question,
+            session_id=body.session_id,
+        )
+    except SessionNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="session was not found",
+        ) from error
+    except (SessionBusyError, SessionLeaseLostError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="session is already processing another question",
+        ) from error
     except QuestionProcessingError as error:
         LOGGER.exception("question processing failed")
         raise HTTPException(
@@ -89,7 +114,7 @@ def create_app(
                 tools=RateTools(repository),
                 max_rounds=settings.max_agent_rounds,
             ),
-            interactions=InteractionRepository(database),
+            conversations=ConversationRepository(database),
         )
         try:
             yield

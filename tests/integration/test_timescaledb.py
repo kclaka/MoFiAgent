@@ -10,11 +10,14 @@ from mofiagent.agent.models import ToolCallRecord
 from mofiagent.database import Database, apply_migrations
 from mofiagent.rates.ingestion import IngestionService
 from mofiagent.rates.repository import (
+    ConversationRepository,
     IngestionRepository,
     InteractionRecord,
     InteractionRepository,
     RateNotFoundError,
     RateRepository,
+    SessionBusyError,
+    SessionNotFoundError,
 )
 from mofiagent.rates.treasury import TreasuryClient, build_feed_url, parse_treasury_feed
 
@@ -114,3 +117,82 @@ async def test_migrations_ingestion_and_exact_rate_queries() -> None:
 def test_fixture_itself_remains_valid() -> None:
     observations = parse_treasury_feed(FIXTURE.read_bytes(), source_url=SOURCE_URL)
     assert len(observations) == 28
+
+
+@pytest.mark.asyncio
+async def test_five_turn_conversation_closes_and_rolls_to_fresh_session() -> None:
+    dsn = _database_dsn()
+    await apply_migrations(dsn, MIGRATIONS)
+    database = Database(dsn, min_size=1, max_size=2, timeout_seconds=5)
+    await database.open()
+    try:
+        conversations = ConversationRepository(database)
+        first_interaction_id = uuid4()
+        started_at = datetime.now(UTC)
+        turn = await conversations.claim_turn(
+            requested_session_id=None,
+            interaction_id=first_interaction_id,
+            claimed_at=started_at,
+        )
+        first_session_id = turn.session_id
+        assert turn.turn_number == 1
+        assert turn.history == []
+
+        with pytest.raises(SessionBusyError):
+            await conversations.claim_turn(
+                requested_session_id=first_session_id,
+                interaction_id=uuid4(),
+                claimed_at=started_at,
+            )
+
+        interaction_id = first_interaction_id
+        completion = None
+        for turn_number in range(1, 6):
+            if turn_number > 1:
+                interaction_id = uuid4()
+                turn = await conversations.claim_turn(
+                    requested_session_id=first_session_id,
+                    interaction_id=interaction_id,
+                    claimed_at=datetime.now(UTC),
+                )
+                assert turn.turn_number == turn_number
+                assert len(turn.history) == turn_number - 1
+
+            completion = await conversations.complete_turn(
+                InteractionRecord(
+                    id=interaction_id,
+                    session_id=turn.session_id,
+                    turn_number=turn.turn_number,
+                    created_at=datetime.now(UTC),
+                    question=f"Question {turn_number}",
+                    answer=f"Answer {turn_number}",
+                    status="answered",
+                    model_name="integration-test-model",
+                    latency_ms=10,
+                    data_as_of=None,
+                ),
+                completed_at=datetime.now(UTC),
+            )
+
+        assert completion is not None
+        assert completion.status == "closed"
+        assert completion.next_session_id is not None
+
+        rollover = await conversations.claim_turn(
+            requested_session_id=first_session_id,
+            interaction_id=uuid4(),
+            claimed_at=datetime.now(UTC),
+        )
+        assert rollover.session_id == completion.next_session_id
+        assert rollover.turn_number == 1
+        assert rollover.history == []
+        assert rollover.restarted is True
+
+        with pytest.raises(SessionNotFoundError):
+            await conversations.claim_turn(
+                requested_session_id=uuid4(),
+                interaction_id=uuid4(),
+                claimed_at=datetime.now(UTC),
+            )
+    finally:
+        await database.close()

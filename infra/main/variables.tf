@@ -37,6 +37,21 @@ variable "application_image" {
   }
 }
 
+variable "migration_image" {
+  description = "Optional image override used to run additive migrations before the application rollout."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = (
+      var.migration_image == null ||
+      can(regex("^[a-z0-9.-]+-docker\\.pkg\\.dev/.+@sha256:[0-9a-f]{64}$", var.migration_image))
+    )
+    error_message = "migration_image must be null or an Artifact Registry image pinned by sha256 digest."
+  }
+}
+
 variable "timescaledb_image" {
   description = "Verified immutable TimescaleDB image reference."
   type        = string

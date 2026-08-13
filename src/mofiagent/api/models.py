@@ -14,6 +14,7 @@ class QuestionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     question: QuestionText
+    session_id: UUID | None = None
 
 
 class SourceReference(BaseModel):
@@ -23,6 +24,11 @@ class SourceReference(BaseModel):
 
 class QuestionResponse(BaseModel):
     id: UUID
+    session_id: UUID
+    turn_number: int = Field(ge=1, le=5)
+    session_status: Literal["active", "closed"]
+    next_session_id: UUID | None = None
+    session_restarted: bool = False
     question: str
     answer: str
     data_as_of: date | None

@@ -34,6 +34,13 @@ class ToolCallRecord(BaseModel):
     success: bool
 
 
+class ConversationExchange(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    question: str
+    answer: str
+
+
 class AgentResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 

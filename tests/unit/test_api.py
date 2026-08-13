@@ -1,21 +1,32 @@
+from uuid import UUID
+
 import httpx
 import pytest
 
 from mofiagent.api.app import create_app
 from mofiagent.api.models import QuestionResponse
 from mofiagent.application import QuestionProcessingError
+from mofiagent.rates.repository import SessionBusyError, SessionNotFoundError
 
 
 class StubQuestionService:
-    def __init__(self, *, fail: bool = False) -> None:
-        self._fail = fail
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self._error = error
 
-    async def answer(self, question: str) -> QuestionResponse:
-        if self._fail:
-            raise QuestionProcessingError("internal detail")
+    async def answer(
+        self,
+        question: str,
+        *,
+        session_id: UUID | None = None,
+    ) -> QuestionResponse:
+        if self._error is not None:
+            raise self._error
         return QuestionResponse.model_validate(
             {
                 "id": "00000000-0000-0000-0000-000000000001",
+                "session_id": session_id or "00000000-0000-0000-0000-000000000002",
+                "turn_number": 1,
+                "session_status": "active",
                 "question": question,
                 "answer": "The 10-year yield was 4.68% on August 12, 2026.",
                 "data_as_of": "2026-08-12",
@@ -84,18 +95,22 @@ async def test_questions_return_grounded_service_response() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/v1/questions",
-            json={"question": "What is the 10-year yield?"},
+            json={
+                "question": "What is the 10-year yield?",
+                "session_id": "00000000-0000-0000-0000-000000000099",
+            },
         )
 
     assert response.status_code == 200
     assert response.json()["data_as_of"] == "2026-08-12"
+    assert response.json()["session_id"] == "00000000-0000-0000-0000-000000000099"
 
 
 @pytest.mark.asyncio
 async def test_questions_hide_processing_failures() -> None:
     app = create_app(
         initialize_dependencies=False,
-        question_service=StubQuestionService(fail=True),
+        question_service=StubQuestionService(error=QuestionProcessingError("internal detail")),
     )
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -106,3 +121,31 @@ async def test_questions_hide_processing_failures() -> None:
 
     assert response.status_code == 503
     assert response.json() == {"detail": "question could not be answered"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_detail"),
+    [
+        (SessionNotFoundError(), 404, "session was not found"),
+        (SessionBusyError(), 409, "session is already processing another question"),
+    ],
+)
+async def test_questions_map_session_errors(
+    error: Exception,
+    expected_status: int,
+    expected_detail: str,
+) -> None:
+    app = create_app(
+        initialize_dependencies=False,
+        question_service=StubQuestionService(error=error),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/questions",
+            json={"question": "What is the 10-year yield?"},
+        )
+
+    assert response.status_code == expected_status
+    assert response.json() == {"detail": expected_detail}

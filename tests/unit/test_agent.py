@@ -7,6 +7,7 @@ import pytest
 from mofiagent.agent.gateway import ModelGateway, ModelSession
 from mofiagent.agent.models import (
     AgentExhaustedError,
+    ConversationExchange,
     ModelToolCall,
     ModelTurn,
     ToolResult,
@@ -31,12 +32,14 @@ class FakeSession:
 class FakeGateway:
     def __init__(self, session: FakeSession) -> None:
         self.session = session
+        self.history: Sequence[ConversationExchange] = ()
 
     @property
     def model_name(self) -> str:
         return "fake-model"
 
-    def create_session(self) -> ModelSession:
+    def create_session(self, history: Sequence[ConversationExchange]) -> ModelSession:
+        self.history = history
         return self.session
 
 

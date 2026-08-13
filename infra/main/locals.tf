@@ -16,6 +16,7 @@ locals {
 
   serverless_subnet_cidr = "10.20.0.0/26"
   database_subnet_cidr   = "10.20.1.0/28"
+  migration_image        = coalesce(var.migration_image, var.application_image)
 
   required_apis = toset([
     "aiplatform.googleapis.com",

@@ -1,12 +1,12 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Protocol
 from uuid import UUID, uuid4
 
-from mofiagent.agent.models import AgentResult
+from mofiagent.agent.models import AgentResult, ConversationExchange
 from mofiagent.api.models import QuestionResponse, SourceReference
-from mofiagent.rates.repository import InteractionRecord
+from mofiagent.rates.repository import InteractionRecord, SessionCompletion, SessionTurn
 from mofiagent.rates.treasury import TREASURY_SOURCE_NAME
 
 
@@ -18,11 +18,29 @@ class AnsweringAgent(Protocol):
     @property
     def model_name(self) -> str: ...
 
-    async def answer(self, question: str) -> AgentResult: ...
+    async def answer(
+        self,
+        question: str,
+        *,
+        history: Sequence[ConversationExchange] = (),
+    ) -> AgentResult: ...
 
 
-class InteractionWriter(Protocol):
-    async def save(self, record: InteractionRecord) -> None: ...
+class ConversationStore(Protocol):
+    async def claim_turn(
+        self,
+        *,
+        requested_session_id: UUID | None,
+        interaction_id: UUID,
+        claimed_at: datetime,
+    ) -> SessionTurn: ...
+
+    async def complete_turn(
+        self,
+        record: InteractionRecord,
+        *,
+        completed_at: datetime,
+    ) -> SessionCompletion: ...
 
 
 class QuestionService:
@@ -30,27 +48,34 @@ class QuestionService:
         self,
         *,
         agent: AnsweringAgent,
-        interactions: InteractionWriter,
+        conversations: ConversationStore,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         timer: Callable[[], float] = perf_counter,
         id_factory: Callable[[], UUID] = uuid4,
     ) -> None:
         self._agent = agent
-        self._interactions = interactions
+        self._conversations = conversations
         self._clock = clock
         self._timer = timer
         self._id_factory = id_factory
 
-    async def answer(self, question: str) -> QuestionResponse:
+    async def answer(self, question: str, *, session_id: UUID | None = None) -> QuestionResponse:
         interaction_id = self._id_factory()
         created_at = self._clock()
         started = self._timer()
+        session = await self._conversations.claim_turn(
+            requested_session_id=session_id,
+            interaction_id=interaction_id,
+            claimed_at=created_at,
+        )
         try:
-            result = await self._agent.answer(question)
+            result = await self._agent.answer(question, history=session.history)
         except Exception as error:
-            await self._interactions.save(
+            await self._conversations.complete_turn(
                 InteractionRecord(
                     id=interaction_id,
+                    session_id=session.session_id,
+                    turn_number=session.turn_number,
                     created_at=created_at,
                     question=question,
                     answer=None,
@@ -59,13 +84,16 @@ class QuestionService:
                     model_name=self._agent.model_name,
                     latency_ms=self._latency_ms(started),
                     error_code=type(error).__name__,
-                )
+                ),
+                completed_at=self._clock(),
             )
             raise QuestionProcessingError("question processing failed") from error
 
-        await self._interactions.save(
+        completion = await self._conversations.complete_turn(
             InteractionRecord(
                 id=interaction_id,
+                session_id=session.session_id,
+                turn_number=session.turn_number,
                 created_at=created_at,
                 question=question,
                 answer=result.answer,
@@ -75,7 +103,8 @@ class QuestionService:
                 source_urls=result.source_urls,
                 model_name=self._agent.model_name,
                 latency_ms=self._latency_ms(started),
-            )
+            ),
+            completed_at=self._clock(),
         )
         source = None
         if result.source_urls:
@@ -84,6 +113,11 @@ class QuestionService:
             )
         return QuestionResponse(
             id=interaction_id,
+            session_id=completion.session_id,
+            turn_number=completion.turn_number,
+            session_status=completion.status,
+            next_session_id=completion.next_session_id,
+            session_restarted=session.restarted,
             question=question,
             answer=result.answer,
             data_as_of=result.data_as_of,

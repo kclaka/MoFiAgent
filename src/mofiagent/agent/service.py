@@ -1,9 +1,11 @@
+from collections.abc import Sequence
 from typing import Protocol
 
 from mofiagent.agent.gateway import ModelGateway
 from mofiagent.agent.models import (
     AgentExhaustedError,
     AgentResult,
+    ConversationExchange,
     ModelToolCall,
     ToolCallRecord,
     ToolResult,
@@ -42,8 +44,13 @@ class AgentService:
     def model_name(self) -> str:
         return self._gateway.model_name
 
-    async def answer(self, question: str) -> AgentResult:
-        session = self._gateway.create_session()
+    async def answer(
+        self,
+        question: str,
+        *,
+        history: Sequence[ConversationExchange] = (),
+    ) -> AgentResult:
+        session = self._gateway.create_session(history)
         turn = await session.ask(question)
         records: list[ToolCallRecord] = []
         successful_payloads: list[dict[str, object]] = []

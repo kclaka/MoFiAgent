@@ -146,7 +146,7 @@ resource "google_cloud_run_v2_job" "migrate" {
       }
 
       containers {
-        image   = var.application_image
+        image   = local.migration_image
         command = ["python", "-m", "mofiagent", "migrate"]
 
         resources {

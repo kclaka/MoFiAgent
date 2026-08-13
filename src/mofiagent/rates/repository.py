@@ -1,13 +1,14 @@
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Literal
-from uuid import UUID
+from typing import Any, Literal, Protocol
+from uuid import UUID, uuid4
 
+from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field
 
-from mofiagent.agent.models import ToolCallRecord
+from mofiagent.agent.models import ConversationExchange, ToolCallRecord
 from mofiagent.database import Database
 from mofiagent.rates.models import (
     SUPPORTED_TENORS_MONTHS,
@@ -27,6 +28,8 @@ class InteractionRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     id: UUID
+    session_id: UUID | None = None
+    turn_number: int | None = Field(default=None, ge=1, le=5)
     created_at: datetime
     question: str
     answer: str | None
@@ -37,6 +40,282 @@ class InteractionRecord(BaseModel):
     model_name: str
     latency_ms: int
     error_code: str | None = None
+
+
+class SessionTurn(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    session_id: UUID
+    turn_number: int = Field(ge=1, le=5)
+    history: list[ConversationExchange]
+    restarted: bool
+
+
+class SessionCompletion(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    session_id: UUID
+    turn_number: int = Field(ge=1, le=5)
+    status: Literal["active", "closed"]
+    next_session_id: UUID | None = None
+
+
+class SessionNotFoundError(LookupError):
+    pass
+
+
+class SessionBusyError(RuntimeError):
+    pass
+
+
+class SessionLeaseLostError(RuntimeError):
+    pass
+
+
+class UUIDFactory(Protocol):
+    def __call__(self) -> UUID: ...
+
+
+MAX_SESSION_TURNS = 5
+
+
+async def _insert_interaction(
+    connection: AsyncConnection[dict[str, Any]],
+    record: InteractionRecord,
+) -> None:
+    tool_calls = [item.model_dump(mode="json") for item in record.tool_calls]
+    await connection.execute(
+        """
+        INSERT INTO interaction_history (
+            id,
+            session_id,
+            turn_number,
+            created_at,
+            question,
+            answer,
+            status,
+            tool_calls,
+            data_as_of,
+            source_urls,
+            model_name,
+            latency_ms,
+            error_code
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            record.id,
+            record.session_id,
+            record.turn_number,
+            record.created_at,
+            record.question,
+            record.answer,
+            record.status,
+            Jsonb(tool_calls),
+            record.data_as_of,
+            Jsonb(record.source_urls),
+            record.model_name,
+            record.latency_ms,
+            record.error_code,
+        ),
+    )
+
+
+class ConversationRepository:
+    """Owns durable five-turn sessions and their single-request lease."""
+
+    def __init__(
+        self,
+        database: Database,
+        *,
+        lease_seconds: int = 60,
+        id_factory: UUIDFactory = uuid4,
+    ) -> None:
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
+        self._database = database
+        self._lease_seconds = lease_seconds
+        self._id_factory = id_factory
+
+    async def claim_turn(
+        self,
+        *,
+        requested_session_id: UUID | None,
+        interaction_id: UUID,
+        claimed_at: datetime,
+    ) -> SessionTurn:
+        restarted = False
+        async with self._database.connection() as connection:
+            if requested_session_id is None:
+                session_id = self._id_factory()
+                await connection.execute(
+                    """
+                    INSERT INTO conversations (
+                        id,
+                        created_at,
+                        pending_interaction_id,
+                        pending_started_at
+                    )
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (session_id, claimed_at, interaction_id, claimed_at),
+                )
+                completed_turns = 0
+            else:
+                session_id = requested_session_id
+                while True:
+                    cursor = await connection.execute(
+                        """
+                        SELECT
+                            status,
+                            completed_turns,
+                            next_session_id,
+                            pending_interaction_id,
+                            pending_started_at
+                        FROM conversations
+                        WHERE id = %s
+                        FOR UPDATE
+                        """,
+                        (session_id,),
+                    )
+                    row = await cursor.fetchone()
+                    if row is None:
+                        raise SessionNotFoundError("session was not found")
+                    if row["status"] == "closed":
+                        next_session_id = row["next_session_id"]
+                        if not isinstance(next_session_id, UUID):
+                            raise RuntimeError("closed session has no successor")
+                        session_id = next_session_id
+                        restarted = True
+                        continue
+
+                    pending_id = row["pending_interaction_id"]
+                    pending_started_at = row["pending_started_at"]
+                    lease_cutoff = claimed_at - timedelta(seconds=self._lease_seconds)
+                    if (
+                        pending_id is not None
+                        and isinstance(pending_started_at, datetime)
+                        and pending_started_at >= lease_cutoff
+                    ):
+                        raise SessionBusyError(
+                            "another question is already running for this session"
+                        )
+
+                    completed_turns = int(row["completed_turns"])
+                    await connection.execute(
+                        """
+                        UPDATE conversations
+                        SET pending_interaction_id = %s,
+                            pending_started_at = %s
+                        WHERE id = %s
+                        """,
+                        (interaction_id, claimed_at, session_id),
+                    )
+                    break
+
+            cursor = await connection.execute(
+                """
+                SELECT question, answer
+                FROM interaction_history
+                WHERE session_id = %s
+                    AND status IN ('answered', 'unsupported')
+                    AND answer IS NOT NULL
+                ORDER BY turn_number
+                """,
+                (session_id,),
+            )
+            rows = await cursor.fetchall()
+
+        history = [
+            ConversationExchange(question=str(row["question"]), answer=str(row["answer"]))
+            for row in rows
+        ]
+        return SessionTurn(
+            session_id=session_id,
+            turn_number=completed_turns + 1,
+            history=history,
+            restarted=restarted,
+        )
+
+    async def complete_turn(
+        self,
+        record: InteractionRecord,
+        *,
+        completed_at: datetime,
+    ) -> SessionCompletion:
+        if record.session_id is None or record.turn_number is None:
+            raise ValueError("session_id and turn_number are required")
+
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT status, completed_turns, pending_interaction_id
+                FROM conversations
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (record.session_id,),
+            )
+            row = await cursor.fetchone()
+            if (
+                row is None
+                or row["status"] != "active"
+                or row["pending_interaction_id"] != record.id
+                or int(row["completed_turns"]) + 1 != record.turn_number
+            ):
+                raise SessionLeaseLostError("session turn lease is no longer active")
+
+            await _insert_interaction(connection, record)
+            if record.turn_number == MAX_SESSION_TURNS:
+                next_session_id = self._id_factory()
+                await connection.execute(
+                    """
+                    INSERT INTO conversations (id, created_at)
+                    VALUES (%s, %s)
+                    """,
+                    (next_session_id, completed_at),
+                )
+                await connection.execute(
+                    """
+                    UPDATE conversations
+                    SET completed_turns = %s,
+                        status = 'closed',
+                        closed_at = %s,
+                        next_session_id = %s,
+                        pending_interaction_id = NULL,
+                        pending_started_at = NULL
+                    WHERE id = %s
+                    """,
+                    (
+                        record.turn_number,
+                        completed_at,
+                        next_session_id,
+                        record.session_id,
+                    ),
+                )
+                return SessionCompletion(
+                    session_id=record.session_id,
+                    turn_number=record.turn_number,
+                    status="closed",
+                    next_session_id=next_session_id,
+                )
+
+            await connection.execute(
+                """
+                UPDATE conversations
+                SET completed_turns = %s,
+                    pending_interaction_id = NULL,
+                    pending_started_at = NULL
+                WHERE id = %s
+                """,
+                (record.turn_number, record.session_id),
+            )
+
+        return SessionCompletion(
+            session_id=record.session_id,
+            turn_number=record.turn_number,
+            status="active",
+        )
 
 
 class RateRepository:
@@ -280,39 +559,8 @@ class InteractionRepository:
         self._database = database
 
     async def save(self, record: InteractionRecord) -> None:
-        tool_calls = [item.model_dump(mode="json") for item in record.tool_calls]
         async with self._database.connection() as connection:
-            await connection.execute(
-                """
-                INSERT INTO interaction_history (
-                    id,
-                    created_at,
-                    question,
-                    answer,
-                    status,
-                    tool_calls,
-                    data_as_of,
-                    source_urls,
-                    model_name,
-                    latency_ms,
-                    error_code
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    record.id,
-                    record.created_at,
-                    record.question,
-                    record.answer,
-                    record.status,
-                    Jsonb(tool_calls),
-                    record.data_as_of,
-                    Jsonb(record.source_urls),
-                    record.model_name,
-                    record.latency_ms,
-                    record.error_code,
-                ),
-            )
+            await _insert_interaction(connection, record)
 
     async def recent(self, *, limit: int) -> list[InteractionRecord]:
         if limit < 1 or limit > 100:
@@ -322,6 +570,8 @@ class InteractionRepository:
                 """
                 SELECT
                     id,
+                    session_id,
+                    turn_number,
                     created_at,
                     question,
                     answer,

@@ -4,8 +4,13 @@ from typing import cast
 import pytest
 from google.genai import types
 
-from mofiagent.agent.gateway import AsyncChat, VertexModelSession, model_turn_from_response
-from mofiagent.agent.models import ToolResult
+from mofiagent.agent.gateway import (
+    AsyncChat,
+    VertexModelSession,
+    chat_history_from,
+    model_turn_from_response,
+)
+from mofiagent.agent.models import ConversationExchange, ToolResult
 
 
 def response_with(*parts: types.Part) -> types.GenerateContentResponse:
@@ -44,6 +49,21 @@ def test_model_turn_extracts_text_and_function_calls() -> None:
     assert turn.tool_calls[0].name == "get_latest_rate"
     assert turn.tool_calls[0].arguments == {"tenor": "10y"}
     assert model_turn_from_response(types.GenerateContentResponse()).tool_calls == []
+
+
+def test_chat_history_alternates_user_and_model_content() -> None:
+    history = chat_history_from(
+        [ConversationExchange(question="What is the 10-year yield?", answer="It is 4.68%.")]
+    )
+
+    user = cast(types.Content, history[0])
+    model = cast(types.Content, history[1])
+    assert user.role == "user"
+    assert user.parts
+    assert user.parts[0].text == "What is the 10-year yield?"
+    assert model.role == "model"
+    assert model.parts
+    assert model.parts[0].text == "It is 4.68%."
 
 
 @pytest.mark.asyncio
