@@ -54,21 +54,21 @@ ephemeral "random_password" "ingest" {
 resource "google_secret_manager_secret_version" "admin_password" {
   secret                 = google_secret_manager_secret.database["admin_password"].id
   secret_data_wo         = ephemeral.random_password.admin.result
-  secret_data_wo_version = var.admin_secret_version_generation
+  secret_data_wo_version = 1
   deletion_policy        = "DISABLE"
 }
 
 resource "google_secret_manager_secret_version" "api_password" {
   secret                 = google_secret_manager_secret.database["api_password"].id
   secret_data_wo         = ephemeral.random_password.api.result
-  secret_data_wo_version = var.runtime_secret_version_generation
+  secret_data_wo_version = 1
   deletion_policy        = "DISABLE"
 }
 
 resource "google_secret_manager_secret_version" "ingest_password" {
   secret                 = google_secret_manager_secret.database["ingest_password"].id
   secret_data_wo         = ephemeral.random_password.ingest.result
-  secret_data_wo_version = var.runtime_secret_version_generation
+  secret_data_wo_version = 1
   deletion_policy        = "DISABLE"
 }
 
@@ -82,7 +82,7 @@ resource "google_secret_manager_secret_version" "admin_dsn" {
     local.database_port,
     local.database_name,
   )
-  secret_data_wo_version = var.admin_secret_version_generation
+  secret_data_wo_version = 1
   deletion_policy        = "DISABLE"
 }
 
@@ -96,7 +96,7 @@ resource "google_secret_manager_secret_version" "api_dsn" {
     local.database_port,
     local.database_name,
   )
-  secret_data_wo_version = var.runtime_secret_version_generation
+  secret_data_wo_version = 1
   deletion_policy        = "DISABLE"
 }
 
@@ -110,7 +110,7 @@ resource "google_secret_manager_secret_version" "ingest_dsn" {
     local.database_port,
     local.database_name,
   )
-  secret_data_wo_version = var.runtime_secret_version_generation
+  secret_data_wo_version = 1
   deletion_policy        = "DISABLE"
 }
 

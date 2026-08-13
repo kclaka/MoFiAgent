@@ -45,7 +45,12 @@ def build_feed_url(year: int) -> str:
     return f"{TREASURY_FEED_URL}?data=daily_treasury_yield_curve&field_tdr_date_value={year}"
 
 
-def parse_treasury_feed(payload: bytes, *, source_url: str) -> list[RateObservation]:
+def parse_treasury_feed(
+    payload: bytes,
+    *,
+    source_url: str,
+    allow_empty: bool = False,
+) -> list[RateObservation]:
     if not payload:
         raise TreasuryFeedError("Treasury feed was empty")
     if len(payload) > MAX_FEED_BYTES:
@@ -59,6 +64,8 @@ def parse_treasury_feed(payload: bytes, *, source_url: str) -> list[RateObservat
     namespaces = {"atom": ATOM_NAMESPACE, "d": DATA_NAMESPACE, "m": METADATA_NAMESPACE}
     entries = root.findall("atom:entry", namespaces)
     if not entries:
+        if allow_empty:
+            return []
         raise TreasuryFeedError("Treasury feed contained no observations")
 
     observations: list[RateObservation] = []
@@ -97,6 +104,8 @@ def parse_treasury_feed(payload: bytes, *, source_url: str) -> list[RateObservat
             )
 
     if not observations:
+        if allow_empty:
+            return []
         raise TreasuryFeedError("Treasury feed contained no usable rates")
     return observations
 

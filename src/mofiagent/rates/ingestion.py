@@ -42,7 +42,7 @@ class IngestionService:
         self._clock = clock
         self._id_factory = id_factory
 
-    async def run(self, year: int) -> IngestionResult:
+    async def run(self, year: int, *, allow_empty: bool = False) -> IngestionResult:
         expected_url = build_feed_url(year)
         run_id = self._id_factory()
         started_at = self._clock()
@@ -50,7 +50,11 @@ class IngestionService:
 
         try:
             source_url, payload = await self._client.fetch_year(year)
-            observations = parse_treasury_feed(payload, source_url=source_url)
+            observations = parse_treasury_feed(
+                payload,
+                source_url=source_url,
+                allow_empty=allow_empty,
+            )
             rows_upserted = await self._rates.upsert_observations(observations)
             completed_at = self._clock()
             await self._runs.succeed(

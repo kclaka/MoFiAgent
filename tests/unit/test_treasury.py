@@ -56,6 +56,17 @@ def test_parse_treasury_feed_rejects_invalid_payload(payload: bytes, message: st
         parse_treasury_feed(payload, source_url=SOURCE_URL)
 
 
+def test_parse_treasury_feed_can_accept_valid_empty_new_year_feed() -> None:
+    assert (
+        parse_treasury_feed(
+            b"<feed />",
+            source_url=SOURCE_URL,
+            allow_empty=True,
+        )
+        == []
+    )
+
+
 def test_parse_treasury_feed_rejects_oversized_payload() -> None:
     with pytest.raises(TreasuryFeedError, match="maximum allowed size"):
         parse_treasury_feed(b"x" * (MAX_FEED_BYTES + 1), source_url=SOURCE_URL)

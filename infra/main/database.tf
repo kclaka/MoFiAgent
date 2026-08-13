@@ -116,6 +116,9 @@ resource "google_compute_instance" "database" {
     admin_password_secret_id  = google_secret_manager_secret.database["admin_password"].secret_id
     api_password_secret_id    = google_secret_manager_secret.database["api_password"].secret_id
     ingest_password_secret_id = google_secret_manager_secret.database["ingest_password"].secret_id
+    admin_password_version    = google_secret_manager_secret_version.admin_password.version
+    api_password_version      = google_secret_manager_secret_version.api_password.version
+    ingest_password_version   = google_secret_manager_secret_version.ingest_password.version
   })
 
   scheduling {

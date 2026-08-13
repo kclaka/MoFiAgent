@@ -1,4 +1,5 @@
 from collections.abc import Coroutine
+from datetime import date
 from typing import Any
 
 import pytest
@@ -54,3 +55,23 @@ def test_main_dispatches_async_commands(
 def test_parser_rejects_missing_command() -> None:
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args([])
+
+
+def test_scheduled_ingestion_overlaps_years_during_early_january() -> None:
+    assert cli.ingestion_targets(None, today=date(2027, 1, 1)) == (
+        (2026, False),
+        (2027, True),
+    )
+    assert cli.ingestion_targets(None, today=date(2027, 1, 7)) == (
+        (2026, False),
+        (2027, True),
+    )
+
+
+def test_scheduled_ingestion_uses_only_current_year_after_grace_period() -> None:
+    assert cli.ingestion_targets(None, today=date(2027, 1, 8)) == ((2027, False),)
+    assert cli.ingestion_targets(None, today=date(2027, 8, 12)) == ((2027, False),)
+
+
+def test_explicit_ingestion_year_bypasses_scheduled_policy() -> None:
+    assert cli.ingestion_targets(2025, today=date(2027, 1, 1)) == ((2025, False),)

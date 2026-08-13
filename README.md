@@ -4,7 +4,7 @@ I built MoFiAgent as a small, deployed agentic service that answers plain-langua
 
 My goal was to keep the service narrow enough to trust and operate, rather than build a broad chatbot. It supports latest and historical yields, changes between dates, yield-curve spreads, and contextual follow-up questions. I do not let the model write SQL or answer a rate from its own memory.
 
-The prompt only required answering individual questions; multi-turn conversation was an extension I chose to add because rate questions naturally lead to follow-ups such as “what was that yield yesterday?” Because the demo endpoint is intentionally public and unauthenticated, I capped each conversation at five questions. That limit preserves useful context while bounding model spend, stored history, and one avenue for abuse.
+The prompt only required answering individual questions; multi-turn conversation was an extension I chose to add because rate questions naturally lead to follow-ups such as “what was that yield yesterday?” Because the demo endpoint is intentionally public and unauthenticated, I capped each conversation at five request attempts. Failed attempts count toward the cap deliberately: otherwise a caller could bypass the cost boundary by repeatedly triggering model or tool failures. The limit preserves useful context while bounding model spend, stored history, and one avenue for abuse.
 
 ## Try the deployed service
 
@@ -53,7 +53,9 @@ curl --fail-with-body \
   https://mofiagent-api-hy3l6ihkeq-ue.a.run.app/v1/questions
 ```
 
-A session accepts five total questions. The fifth response has `session_status: "closed"` and supplies `next_session_id`. If a client submits the old closed ID again, the service automatically moves the request to the empty successor session and returns `session_restarted: true`. I chose this cap as a lightweight abuse and cost control for an unauthenticated take-home API; it limits how much context any one session can accumulate without making the client coordinate a separate session-creation request.
+A session accepts five total request attempts. A successful fifth response has `session_status: "closed"` and supplies `next_session_id`. If processing fails, the service returns a generic 503 without exposing the internal exception; when the failure was durably recorded, the error body and `X-MoFi-*` response headers include the turn and session lifecycle metadata. This matters on attempt five because the client still receives the successor ID even though there was no answer. If a client submits an old closed ID again, the service automatically moves the request to the empty successor session and returns `session_restarted: true`.
+
+I chose this cap as a lightweight abuse and cost control for an unauthenticated take-home API. It limits context and attempted model work without making the client coordinate a separate session-creation request. Failed attempts are retained in the audit log but are excluded from Gemini chat history because they have no trustworthy assistant answer to replay.
 
 The only other public route is the process health check:
 
@@ -71,7 +73,7 @@ MoFiAgent currently covers nominal Treasury tenors of 1, 1.5, 2, 3, 4, and 6 mon
 - “What was the 2s10s spread on August 12, 2026?”
 - “What was that longer yield the previous day?”
 
-For a weekend, holiday, or other date without an observation, the historical tool returns the latest prior observation and the answer is required to say so. A new environment contains only the years that have been explicitly ingested; the scheduled job refreshes the current UTC calendar year.
+For a weekend, holiday, or other date without an observation, the historical tool returns the latest prior observation and the answer is required to say so. A new environment contains only the years that have been explicitly ingested. The scheduled job normally refreshes the current UTC calendar year; from January 1 through January 7 it also re-fetches the prior year so late-published December observations are not skipped, while a valid but not-yet-populated new-year feed is accepted during that grace period.
 
 ## Architecture
 
@@ -100,14 +102,14 @@ flowchart LR
 
 1. FastAPI validates a 3–500 character question and an optional UUID session ID.
 2. A transaction in TimescaleDB creates or locks the session, allocates the next turn, and prevents concurrent requests from corrupting its ordering.
-3. Up to four prior question/answer pairs are rebuilt as Gemini chat history.
+3. Up to four prior successful question/answer pairs are rebuilt as Gemini chat history.
 4. Gemini may select one or more of four function tools: latest rate, historical rate, date comparison, or curve spread.
 5. Pydantic rejects unknown fields, unsupported tenors, invalid dates, and invented tool names before a query runs.
 6. Repository code executes parameterized SQL and returns exact `Decimal` values, dates, and the authoritative source URL.
 7. Gemini writes the human-readable response from those tool results. The service records the answer, tool metadata, latency, status, data date, and source URL atomically with the completed turn.
-8. Turn five closes the session and creates its empty successor in the same transaction.
+8. Attempt five closes the session and creates its empty successor in the same transaction, including when the attempt failed after the lease was acquired.
 
-The agent is bounded to four model/tool rounds and eight tool calls per request. If no rate tool succeeds, it returns a fixed scope message instead of treating ungrounded model text as an answer.
+The agent is bounded to four model/tool rounds and eight tool calls per request. Independent tool calls from one model turn run concurrently. If no tool was requested, the service returns a fixed scope response rather than trust an ungrounded numerical answer. If tools were attempted but none produced an observation, it returns a distinct fixed “data unavailable” response. Conversation history helps Gemini resolve references, but every factual rate answer must still be refreshed through a tool.
 
 ## Infrastructure on Google Cloud
 
@@ -126,10 +128,11 @@ I described the entire deployed stack with Terraform. Application compute is in 
 | Cloud NAT | Outbound access for the private VM | Lets the database VM pull its pinned container and reach Google APIs without public inbound exposure |
 | Secret Manager | Separate admin, API, and ingestion DSNs | Runtime identities see only the credential they require; generated password values use write-only Terraform attributes |
 | Dedicated service and database accounts | API, migration, ingestion, scheduler, and VM isolation | Limits blast radius: only the API identity can call Vertex AI, and only migration receives the database administrator DSN |
-| Artifact Registry and Cloud Build | Immutable application releases | Every deployed image is digest-pinned; the registry rejects tag mutation |
+| Artifact Registry and Cloud Build | Immutable application releases | A dedicated least-privilege build identity can only read its short-lived source objects, write build logs, and publish images; every deployed image is digest-pinned and the registry rejects tag mutation |
+| Private build-source bucket | Cloud Build input staging | Public access is prevented and submitted source objects expire after seven days instead of accumulating in a provider-default bucket |
 | Versioned GCS state backend | Main Terraform state | Provides durable, versioned state without committing credentials or state files to Git |
 
-Cloud Run uses [Direct VPC egress](https://docs.cloud.google.com/run/docs/configuring/vpc-direct-vpc) with a `/26` serverless subnet, the minimum size Google documents for its block allocation model. The API is capped at two instances with concurrency eight, a four-connection pool per instance, and a 30-second platform timeout. Those limits intentionally protect the single small database VM and constrain surprise cost.
+Cloud Run uses [Direct VPC egress](https://docs.cloud.google.com/run/docs/configuring/vpc-direct-vpc) with a `/26` serverless subnet, the minimum size Google documents for its block allocation model. The API is capped at two instances with concurrency eight and a four-connection pool per instance. A request has a 90-second application deadline inside a 120-second Cloud Run timeout; its session lease is 150 seconds, leaving time for failure auditing before another caller may reclaim the turn. These limits protect the single small database VM, prevent a legitimate bounded agent turn from being cut off at the platform layer, and constrain surprise cost.
 
 The VM uses Container-Optimized OS, Shielded VM features, OS Login, IAP-only SSH ingress, automatic restart, and a digest-pinned TimescaleDB image. The database data disk has `prevent_destroy`; the VM also has deletion protection. Removing either requires an explicit, reviewed two-phase change.
 
@@ -139,7 +142,7 @@ The VM uses Container-Optimized OS, Shielded VM features, OS Login, IAP-only SSH
 
 I chose a bounded tool-calling agent rather than a deterministic question parser. A parser could handle a few hard-coded examples more cheaply, but it becomes brittle around phrasing and contextual follow-ups. Letting Gemini choose from a small tool surface demonstrates actual agent behavior while keeping the numerical work deterministic. The model decides what information it needs; it never controls SQL, credentials, infrastructure, or arbitrary code.
 
-The trade-off is extra latency, model cost, and nondeterminism. Tool-call and round budgets, strict schemas, fixed unsupported behavior, and persisted audit data bound those risks. A production version would add an evaluation suite before changing prompts or model versions.
+The trade-off is extra latency, model cost, and nondeterminism. Tool-call and round budgets, strict schemas, separate unsupported/unavailable behavior, an end-to-end deadline, and persisted audit data bound those risks. A production version would add an evaluation suite before changing prompts or model versions.
 
 ### Exact SQL instead of vector RAG for rate observations
 
@@ -163,7 +166,7 @@ At the current data volume, ordinary PostgreSQL with a composite index would be 
 
 ### TimescaleDB-backed conversations instead of process memory
 
-Multi-turn conversation was not required by the prompt. I added it because contextual follow-ups are a natural part of asking about rates, then deliberately stopped at five questions per session. The cap is defense in depth for a public endpoint: it bounds context growth, model cost, persisted history, and repeated use of a leaked session ID. It is not a replacement for authentication, per-caller quotas, or edge rate limiting, which remain V2 work.
+Multi-turn conversation was not required by the prompt. I added it because contextual follow-ups are a natural part of asking about rates, then deliberately stopped at five request attempts per session. The cap is defense in depth for a public endpoint: it bounds context growth, model cost, persisted history, and repeated use of a leaked session ID. It is not a replacement for authentication, per-caller quotas, or edge rate limiting, which remain V2 work.
 
 Once I chose to support follow-ups, I used durable conversation state rather than relying on the chat object's process memory. The Google Gen AI SDK can construct a chat from prior messages, but a Cloud Run instance can disappear or another instance can receive the next request. Process-local chat state therefore cannot be the system of record. MoFiAgent persists completed exchanges and reconstructs a short Gemini history on every request.
 
@@ -187,9 +190,9 @@ The trade-offs are cold starts, ephemeral instances, and less control over place
 
 I split the infrastructure into two Terraform stacks. `infra/bootstrap` creates the resources needed to hold the rest of the deployment: the Artifact Registry repository, required build APIs, and versioned GCS state bucket. `infra/main` then uses that bucket as its backend and owns all runtime infrastructure. This separation resolves the backend bootstrapping dependency and keeps the main state remote.
 
-Images and the TimescaleDB base are pinned by SHA-256 digest. Terraform refuses a mutable application image reference. Database migrations are immutable, checksummed, serialized with a PostgreSQL advisory lock, and run as a separate job with the admin role. A `migration_image` override allows an additive migration to run before the API changes to the new image.
+Images and the TimescaleDB base are pinned by SHA-256 digest. Terraform refuses a mutable application image reference. Database migrations are immutable, checksummed, serialized with a PostgreSQL advisory lock, and run as a separate job with the admin role. Migrations create the NOLOGIN runtime roles before granting privileges, so schema deployment does not race the VM startup script that later enables login with generated credentials. A `migration_image` override allows an additive migration to run before the API changes to the new image.
 
-The bootstrap stack currently retains local Terraform state because it creates the remote state bucket itself. That state must be protected by the operator. In a larger organization, the state bucket and Artifact Registry would normally come from a separately administered platform bootstrap or organization-level stack.
+The bootstrap stack begins with local state because it must create the remote state bucket itself. Immediately after that first apply, the operator migrates the bootstrap state into a separate prefix in the versioned bucket; the main stack uses its own prefix. Bootstrap also owns the dedicated Cloud Build identity, private source-staging bucket, Artifact Registry repository, and APIs required before the main stack can be planned in a fresh project. In a larger organization, these resources would normally come from a separately administered platform bootstrap or organization-level stack.
 
 ## How I used GenAI to move quickly
 
@@ -304,7 +307,17 @@ terraform -chdir=infra/bootstrap plan -out=bootstrap.tfplan
 terraform -chdir=infra/bootstrap apply bootstrap.tfplan
 ```
 
-Edit `infra/bootstrap/terraform.tfvars` before planning. Do not commit that file or `infra/bootstrap/terraform.tfstate`; both are ignored. Preserve the bootstrap state securely because it owns the state bucket and immutable Artifact Registry repository.
+Edit `infra/bootstrap/terraform.tfvars` before planning. Do not commit that file or `infra/bootstrap/terraform.tfstate`; both are ignored. After the first apply creates the bucket, migrate bootstrap state into its remote prefix:
+
+```bash
+cp infra/bootstrap/backend.tf.example infra/bootstrap/backend.tf
+cp infra/bootstrap/backend.hcl.example infra/bootstrap/backend.hcl
+terraform -chdir=infra/bootstrap init \
+  -migrate-state \
+  -backend-config=backend.hcl
+```
+
+Set the unique bucket name in `infra/bootstrap/backend.hcl` before running the migration. Terraform retains bucket object versions, and the separate `bootstrap` prefix prevents this state from overlapping the main stack.
 
 ### 3. Build the first immutable image
 
@@ -312,6 +325,7 @@ Edit `infra/bootstrap/terraform.tfvars` before planning. Do not commit that file
 gcloud builds submit \
   --project YOUR_PROJECT_ID \
   --config cloudbuild.yaml \
+  --gcs-source-staging-dir gs://YOUR_PROJECT_ID-mofiagent-build-source/source \
   --substitutions _REGION=us-east1,_REPOSITORY=mofiagent \
   .
 
@@ -380,11 +394,12 @@ This expand-before-contract sequence prevents new code from starting before its 
 
 ## Operations and security posture
 
-- Ingestion runs daily at 02:00 UTC, upserts the current year's feed, and records success/failure plus row counts in `ingestion_runs`.
+- Ingestion runs daily at 02:00 UTC, normally upserts the current year's feed, overlaps the previous year during January 1–7, and records success/failure plus row counts in `ingestion_runs`.
 - The API, migration job, and ingestion job have separate Google service accounts and separate PostgreSQL roles. Human SSH access is not granted by this stack.
 - Cloud Run obtains Google credentials from its assigned service identity; there is no service-account key file in the container.
 - PostgreSQL is reachable only at `10.20.1.2` inside the custom VPC. IAP is the only configured SSH ingress path.
 - Secret payloads are not exposed in normal Terraform plan output or persisted as ordinary random-password resource attributes.
+- Initial database secret versions are deliberately fixed in Terraform instead of presenting a misleading “rotation generation” input. The VM reads those exact versions and reconciles the admin, API, and ingestion PostgreSQL roles on boot. A safe future rotation must coordinate new database passwords, DSN versions, workload revisions, and rollback; automated rotation remains V2 work.
 - The public API exposes no history-listing endpoint. Interaction records remain private in the database.
 - Structured API/job logs and the database container's `gcplogs` output go to Cloud Logging. VPC Flow Logs, firewall logs, and NAT error logs are enabled.
 - The application image runs as UID/GID 10001 in a two-stage, digest-pinned container with no development dependencies.
@@ -456,9 +471,9 @@ Add session TTLs, retention/deletion policies, explicit session APIs, per-user a
 
 Add typed tools for SOFR, effective federal funds, TIPS, and selected FRED series, with source-specific schemas and provenance. Add vector RAG only for qualitative documents such as FOMC statements or rate methodology. Numerical claims would still have to come from exact tools, and responses would distinguish observation date, publication date, source, and revision status.
 
-### 8. Harden the delivery pipeline
+### 8. Extend the delivery pipeline
 
-Run all checks on pull requests, use a dedicated least-privilege Cloud Build service account, generate an SBOM, scan dependencies and images, attest build provenance, and promote one digest through environments. Automate migration-first rollout, smoke tests, canary traffic, rollback, and the final Terraform drift check. Move bootstrap ownership to a separately administered platform stack so no durable infrastructure state depends on one operator's local file.
+Run all checks on pull requests, generate an SBOM, scan dependencies and images, attest build provenance, and promote one digest through environments using the existing least-privilege Cloud Build identity. Automate migration-first rollout, smoke tests, canary traffic, rollback, and the final Terraform drift check. Move bootstrap ownership to a separately administered platform stack so no durable infrastructure state depends on one operator's local file.
 
 ## Repository map
 

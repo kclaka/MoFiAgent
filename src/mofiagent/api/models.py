@@ -37,7 +37,7 @@ class QuestionResponse(BaseModel):
 
 class HistoryItem(QuestionResponse):
     created_at: datetime
-    status: Literal["answered", "unsupported", "failed"]
+    status: Literal["answered", "unsupported", "unavailable", "failed"]
 
 
 class HistoryResponse(BaseModel):

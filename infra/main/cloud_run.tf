@@ -22,7 +22,7 @@ resource "google_cloud_run_v2_service" "api" {
     }
 
     service_account                  = google_service_account.api.email
-    timeout                          = "30s"
+    timeout                          = "120s"
     max_instance_request_concurrency = 8
 
     scaling {
@@ -63,6 +63,8 @@ resource "google_cloud_run_v2_service" "api" {
           MOFI_DB_CONNECT_TIMEOUT_SECONDS = "10"
           MOFI_DB_STARTUP_TIMEOUT_SECONDS = "120"
           MOFI_MAX_AGENT_ROUNDS           = "4"
+          MOFI_QUESTION_DEADLINE_SECONDS  = "90"
+          MOFI_SESSION_LEASE_SECONDS      = "150"
         })
         content {
           name  = env.key

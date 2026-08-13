@@ -1,3 +1,4 @@
+import pytest
 from pydantic import SecretStr
 
 from mofiagent.config import Settings
@@ -13,6 +14,8 @@ def test_defaults_are_bounded() -> None:
     assert settings.db_startup_timeout_seconds == 30
     assert settings.google_cloud_location == "us"
     assert settings.vertex_model == "gemini-3.5-flash"
+    assert settings.question_deadline_seconds == 90
+    assert settings.session_lease_seconds == 150
 
 
 def test_service_validation_rejects_missing_dependencies() -> None:
@@ -60,3 +63,11 @@ def test_service_validation_requires_project() -> None:
         assert "GOOGLE_CLOUD_PROJECT" in str(error)
     else:
         raise AssertionError("expected project validation to fail")
+
+
+def test_session_lease_must_outlive_question_deadline() -> None:
+    with pytest.raises(ValueError, match="SESSION_LEASE_SECONDS"):
+        Settings(
+            question_deadline_seconds=90,
+            session_lease_seconds=119,
+        )

@@ -44,8 +44,13 @@ class FakeGateway:
 
 
 class FakeTools:
+    def __init__(self, result: ToolResult | None = None) -> None:
+        self._result = result
+
     async def execute(self, call: ModelToolCall) -> ToolResult:
         assert call.name == "get_latest_rate"
+        if self._result is not None:
+            return self._result
         return ToolResult(
             name=call.name,
             ok=True,
@@ -57,9 +62,14 @@ class FakeTools:
         )
 
 
-def service(turns: Sequence[ModelTurn], *, max_rounds: int = 4) -> AgentService:
+def service(
+    turns: Sequence[ModelTurn],
+    *,
+    max_rounds: int = 4,
+    tool_result: ToolResult | None = None,
+) -> AgentService:
     gateway = cast(ModelGateway, FakeGateway(FakeSession(turns)))
-    tools = cast(ToolExecutor, FakeTools())
+    tools = cast(ToolExecutor, FakeTools(tool_result))
     return AgentService(gateway=gateway, tools=tools, max_rounds=max_rounds)
 
 
@@ -91,12 +101,33 @@ async def test_agent_rejects_ungrounded_model_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_distinguishes_failed_rate_lookup_from_unsupported_question() -> None:
+    result = await service(
+        [
+            ModelTurn(
+                tool_calls=[ModelToolCall(name="get_latest_rate", arguments={"tenor": "10y"})]
+            ),
+            ModelTurn(text="A model-authored explanation that is not grounded."),
+        ],
+        tool_result=ToolResult(
+            name="get_latest_rate",
+            ok=False,
+            payload={"error": "no matching observation"},
+        ),
+    ).answer("What was the 10-year yield in 1989?")
+
+    assert result.status == "unavailable"
+    assert "couldn't retrieve" in result.answer
+    assert result.tool_calls[0].success is False
+
+
+@pytest.mark.asyncio
 async def test_agent_enforces_round_budget() -> None:
     tool_turn = ModelTurn(
         tool_calls=[ModelToolCall(name="get_latest_rate", arguments={"tenor": "10y"})]
     )
     with pytest.raises(AgentExhaustedError, match="round"):
-        await service([tool_turn, tool_turn], max_rounds=1).answer("Keep calling")
+        await service([tool_turn], max_rounds=1).answer("Keep calling")
 
 
 def test_agent_rejects_invalid_budgets() -> None:

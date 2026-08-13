@@ -1,5 +1,5 @@
 import os
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -17,6 +17,7 @@ from mofiagent.rates.repository import (
     RateNotFoundError,
     RateRepository,
     SessionBusyError,
+    SessionLeaseLostError,
     SessionNotFoundError,
 )
 from mofiagent.rates.treasury import TreasuryClient, build_feed_url, parse_treasury_feed
@@ -110,6 +111,37 @@ async def test_migrations_ingestion_and_exact_rate_queries() -> None:
         recent = await interactions.recent(limit=100)
         saved = next(item for item in recent if item.id == interaction_id)
         assert saved.tool_calls[0].name == "get_latest_rate"
+
+        async with database.connection() as connection:
+            privileges = await connection.execute(
+                """
+                SELECT
+                    has_table_privilege(
+                        'mofi_api', 'conversations', 'SELECT'
+                    ) AS api_can_read_conversations,
+                    has_table_privilege(
+                        'mofi_api', 'interaction_history', 'INSERT'
+                    ) AS api_can_write_history,
+                    has_table_privilege(
+                        'mofi_ingest', 'rate_observations', 'UPDATE'
+                    ) AS ingest_can_update_rates
+                """
+            )
+            assert await privileges.fetchone() == {
+                "api_can_read_conversations": True,
+                "api_can_write_history": True,
+                "ingest_can_update_rates": True,
+            }
+            duplicate_index = await connection.execute(
+                """
+                SELECT count(*) AS count
+                FROM pg_indexes
+                WHERE indexname = 'interaction_history_session_history_idx'
+                """
+            )
+            duplicate_index_row = await duplicate_index.fetchone()
+            assert duplicate_index_row is not None
+            assert duplicate_index_row["count"] == 0
     finally:
         await database.close()
 
@@ -194,5 +226,64 @@ async def test_five_turn_conversation_closes_and_rolls_to_fresh_session() -> Non
                 interaction_id=uuid4(),
                 claimed_at=datetime.now(UTC),
             )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_expired_session_lease_can_be_reclaimed_without_old_writer_winning() -> None:
+    dsn = _database_dsn()
+    await apply_migrations(dsn, MIGRATIONS)
+    database = Database(dsn, min_size=1, max_size=2, timeout_seconds=5)
+    await database.open()
+    try:
+        conversations = ConversationRepository(database, lease_seconds=2)
+        started_at = datetime.now(UTC)
+        stale_interaction_id = uuid4()
+        stale = await conversations.claim_turn(
+            requested_session_id=None,
+            interaction_id=stale_interaction_id,
+            claimed_at=started_at,
+        )
+        replacement_interaction_id = uuid4()
+        replacement = await conversations.claim_turn(
+            requested_session_id=stale.session_id,
+            interaction_id=replacement_interaction_id,
+            claimed_at=started_at + timedelta(seconds=3),
+        )
+
+        with pytest.raises(SessionLeaseLostError):
+            await conversations.complete_turn(
+                InteractionRecord(
+                    id=stale_interaction_id,
+                    session_id=stale.session_id,
+                    turn_number=stale.turn_number,
+                    created_at=started_at,
+                    question="Stale question",
+                    answer="Stale answer",
+                    status="answered",
+                    model_name="integration-test-model",
+                    latency_ms=3000,
+                    data_as_of=None,
+                ),
+                completed_at=datetime.now(UTC),
+            )
+
+        completion = await conversations.complete_turn(
+            InteractionRecord(
+                id=replacement_interaction_id,
+                session_id=replacement.session_id,
+                turn_number=replacement.turn_number,
+                created_at=started_at,
+                question="Replacement question",
+                answer="Replacement answer",
+                status="answered",
+                model_name="integration-test-model",
+                latency_ms=10,
+                data_as_of=None,
+            ),
+            completed_at=datetime.now(UTC),
+        )
+        assert completion.turn_number == 1
     finally:
         await database.close()

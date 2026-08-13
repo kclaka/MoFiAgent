@@ -45,7 +45,7 @@ class AgentResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     answer: str
-    status: Literal["answered", "unsupported"]
+    status: Literal["answered", "unsupported", "unavailable"]
     tool_calls: list[ToolCallRecord]
     data_as_of: date | None = None
     source_urls: list[str] = Field(default_factory=list)

@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from typing import cast
@@ -40,11 +41,35 @@ class FakeAgent:
         return self._result
 
 
+class NeverCompletingAgent:
+    @property
+    def model_name(self) -> str:
+        return "fake-model"
+
+    async def answer(
+        self,
+        question: str,
+        *,
+        history: Sequence[ConversationExchange] = (),
+    ) -> AgentResult:
+        assert question
+        assert history
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
 class FakeConversations:
-    def __init__(self, *, turn_number: int = 1, restarted: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        turn_number: int = 1,
+        restarted: bool = False,
+        completion_error: Exception | None = None,
+    ) -> None:
         self.records: list[InteractionRecord] = []
         self.turn_number = turn_number
         self.restarted = restarted
+        self.completion_error = completion_error
         self.history = [ConversationExchange(question="Initial question", answer="Initial answer")]
 
     async def claim_turn(
@@ -72,6 +97,8 @@ class FakeConversations:
         completed_at: datetime,
     ) -> SessionCompletion:
         assert completed_at
+        if self.completion_error is not None:
+            raise self.completion_error
         self.records.append(record)
         closed = self.turn_number == 5
         return SessionCompletion(
@@ -87,8 +114,13 @@ def question_service(
     *,
     turn_number: int = 1,
     restarted: bool = False,
+    completion_error: Exception | None = None,
 ) -> tuple[QuestionService, FakeConversations, FakeAgent]:
-    conversations = FakeConversations(turn_number=turn_number, restarted=restarted)
+    conversations = FakeConversations(
+        turn_number=turn_number,
+        restarted=restarted,
+        completion_error=completion_error,
+    )
     agent = FakeAgent(result)
     timer = iter([10.0, 10.125])
     service = QuestionService(
@@ -137,6 +169,57 @@ async def test_question_service_persists_failure_without_leaking_error() -> None
     assert conversations.records[0].status == "failed"
     assert conversations.records[0].answer is None
     assert conversations.records[0].error_code == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_question_service_preserves_agent_error_when_failure_audit_fails() -> None:
+    service, conversations, _ = question_service(
+        RuntimeError("original model failure"),
+        completion_error=RuntimeError("audit database failure"),
+    )
+
+    with pytest.raises(QuestionProcessingError) as captured:
+        await service.answer("What's the 10-year yield?")
+
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert str(captured.value.__cause__) == "original model failure"
+    assert conversations.records == []
+
+
+@pytest.mark.asyncio
+async def test_question_service_deadline_cancels_agent_and_records_timeout() -> None:
+    conversations = FakeConversations()
+    timer = iter([10.0, 10.125])
+    service = QuestionService(
+        agent=cast(AnsweringAgent, NeverCompletingAgent()),
+        conversations=cast(ConversationStore, conversations),
+        clock=lambda: datetime(2026, 8, 12, 21, 0, tzinfo=UTC),
+        timer=lambda: next(timer),
+        id_factory=lambda: UUID("00000000-0000-0000-0000-000000000010"),
+        deadline_seconds=0.001,
+    )
+
+    with pytest.raises(QuestionProcessingError) as captured:
+        await service.answer("What's the 10-year yield?")
+
+    assert isinstance(captured.value.__cause__, TimeoutError)
+    assert conversations.records[0].error_code == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_question_service_exposes_fifth_failed_attempt_rollover() -> None:
+    service, conversations, _ = question_service(
+        RuntimeError("model timeout"),
+        turn_number=5,
+    )
+
+    with pytest.raises(QuestionProcessingError) as captured:
+        await service.answer("Fifth question", session_id=SESSION_ID)
+
+    assert captured.value.completion is not None
+    assert captured.value.completion.status == "closed"
+    assert captured.value.completion.next_session_id == NEXT_SESSION_ID
+    assert conversations.records[0].status == "failed"
 
 
 @pytest.mark.asyncio

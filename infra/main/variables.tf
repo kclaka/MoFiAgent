@@ -97,28 +97,6 @@ variable "snapshot_retention_days" {
   }
 }
 
-variable "admin_secret_version_generation" {
-  description = "Administrative credential generation; change only with the coordinated break-glass rotation procedure."
-  type        = number
-  default     = 1
-
-  validation {
-    condition     = var.admin_secret_version_generation >= 1
-    error_message = "admin_secret_version_generation must be positive."
-  }
-}
-
-variable "runtime_secret_version_generation" {
-  description = "Increment intentionally to rotate the API and ingestion database credentials."
-  type        = number
-  default     = 1
-
-  validation {
-    condition     = var.runtime_secret_version_generation >= 1
-    error_message = "runtime_secret_version_generation must be positive."
-  }
-}
-
 variable "scheduler_cron" {
   description = "UTC cron expression for Treasury ingestion."
   type        = string

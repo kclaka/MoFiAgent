@@ -7,6 +7,3 @@ application_image = "us-east1-docker.pkg.dev/modern-fi/mofiagent/mofiagent@sha25
 
 snapshot_retention_days = 30
 database_deletion_protection = true
-
-admin_secret_version_generation   = 1
-runtime_secret_version_generation = 1

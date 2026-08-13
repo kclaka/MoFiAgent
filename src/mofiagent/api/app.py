@@ -5,6 +5,7 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 
 from mofiagent import __version__
 from mofiagent.agent.gateway import VertexModelGateway
@@ -49,7 +50,10 @@ def _question_service(request: Request) -> QuestionAnswerer:
     return service
 
 
-async def answer_question(request: Request, body: QuestionRequest) -> QuestionResponse:
+async def answer_question(
+    request: Request,
+    body: QuestionRequest,
+) -> QuestionResponse | JSONResponse:
     try:
         return await _question_service(request).answer(
             body.question,
@@ -67,10 +71,35 @@ async def answer_question(request: Request, body: QuestionRequest) -> QuestionRe
         ) from error
     except QuestionProcessingError as error:
         LOGGER.exception("question processing failed")
-        raise HTTPException(
+        headers = None
+        content: dict[str, str | int | None] = {
+            "detail": "question could not be answered",
+        }
+        if error.completion is not None:
+            headers = {
+                "X-MoFi-Session-Id": str(error.completion.session_id),
+                "X-MoFi-Turn-Number": str(error.completion.turn_number),
+                "X-MoFi-Session-Status": error.completion.status,
+            }
+            content.update(
+                {
+                    "session_id": str(error.completion.session_id),
+                    "turn_number": error.completion.turn_number,
+                    "session_status": error.completion.status,
+                    "next_session_id": (
+                        str(error.completion.next_session_id)
+                        if error.completion.next_session_id is not None
+                        else None
+                    ),
+                }
+            )
+            if error.completion.next_session_id is not None:
+                headers["X-MoFi-Next-Session-Id"] = str(error.completion.next_session_id)
+        return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="question could not be answered",
-        ) from error
+            content=content,
+            headers=headers,
+        )
 
 
 def create_app(
@@ -114,7 +143,11 @@ def create_app(
                 tools=RateTools(repository),
                 max_rounds=settings.max_agent_rounds,
             ),
-            conversations=ConversationRepository(database),
+            conversations=ConversationRepository(
+                database,
+                lease_seconds=settings.session_lease_seconds,
+            ),
+            deadline_seconds=settings.question_deadline_seconds,
         )
         try:
             yield

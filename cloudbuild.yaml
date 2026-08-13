@@ -14,6 +14,8 @@ images:
 options:
   logging: CLOUD_LOGGING_ONLY
 
+serviceAccount: projects/${PROJECT_ID}/serviceAccounts/mofi-build@${PROJECT_ID}.iam.gserviceaccount.com
+
 substitutions:
   _REGION: us-east1
   _REPOSITORY: mofiagent

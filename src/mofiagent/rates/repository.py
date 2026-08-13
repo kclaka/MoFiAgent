@@ -33,7 +33,7 @@ class InteractionRecord(BaseModel):
     created_at: datetime
     question: str
     answer: str | None
-    status: Literal["answered", "unsupported", "failed"]
+    status: Literal["answered", "unsupported", "unavailable", "failed"]
     tool_calls: list[ToolCallRecord] = Field(default_factory=list[ToolCallRecord])
     data_as_of: date | None
     source_urls: list[str] = Field(default_factory=list[str])
@@ -77,6 +77,7 @@ class UUIDFactory(Protocol):
 
 
 MAX_SESSION_TURNS = 5
+DEFAULT_SESSION_LEASE_SECONDS = 150
 
 
 async def _insert_interaction(
@@ -128,7 +129,7 @@ class ConversationRepository:
         self,
         database: Database,
         *,
-        lease_seconds: int = 60,
+        lease_seconds: int = DEFAULT_SESSION_LEASE_SECONDS,
         id_factory: UUIDFactory = uuid4,
     ) -> None:
         if lease_seconds < 1:
@@ -218,7 +219,7 @@ class ConversationRepository:
                 SELECT question, answer
                 FROM interaction_history
                 WHERE session_id = %s
-                    AND status IN ('answered', 'unsupported')
+                    AND status IN ('answered', 'unsupported', 'unavailable')
                     AND answer IS NOT NULL
                 ORDER BY turn_number
                 """,

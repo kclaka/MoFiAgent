@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, PositiveFloat, SecretStr
+from pydantic import Field, PositiveFloat, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +35,17 @@ class Settings(BaseSettings):
 
     max_agent_rounds: int = Field(default=4, ge=1, le=8)
     request_timeout_seconds: PositiveFloat = 20.0
+    question_deadline_seconds: PositiveFloat = 90.0
+    session_lease_seconds: int = Field(default=150, ge=30, le=900)
+
+    @model_validator(mode="after")
+    def validate_deadlines(self) -> "Settings":
+        if self.session_lease_seconds < self.question_deadline_seconds + 30:
+            raise ValueError(
+                "MOFI_SESSION_LEASE_SECONDS must be at least 30 seconds longer than "
+                "MOFI_QUESTION_DEADLINE_SECONDS"
+            )
+        return self
 
     def validate_for_database(self) -> None:
         if self.database_dsn is None:

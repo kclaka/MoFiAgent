@@ -1,7 +1,7 @@
 import argparse
 import asyncio
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import uvicorn
 
@@ -11,6 +11,8 @@ from mofiagent.rates.ingestion import IngestionService
 from mofiagent.rates.repository import IngestionRepository, RateRepository
 from mofiagent.rates.treasury import TreasuryClient
 from mofiagent.telemetry.logging import configure_logging
+
+YEAR_ROLLOVER_GRACE_DAYS = 7
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,8 +24,11 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument(
         "--year",
         type=int,
-        default=datetime.now(UTC).year,
-        help="Treasury calendar year to ingest (default: current UTC year)",
+        default=None,
+        help=(
+            "Treasury calendar year to ingest; by default the scheduled policy ingests the "
+            "current year plus the prior year during the first seven days of January"
+        ),
     )
     return parser
 
@@ -58,7 +63,19 @@ async def _run_migrations() -> None:
         print("Database schema is current")
 
 
-async def _run_ingestion(year: int) -> None:
+def ingestion_targets(
+    requested_year: int | None,
+    *,
+    today: date,
+) -> tuple[tuple[int, bool], ...]:
+    if requested_year is not None:
+        return ((requested_year, False),)
+    if today.month == 1 and today.day <= YEAR_ROLLOVER_GRACE_DAYS:
+        return ((today.year - 1, False), (today.year, True))
+    return ((today.year, False),)
+
+
+async def _run_ingestion(year: int | None) -> None:
     settings = get_settings()
     database = _database_from_settings()
     await database.open()
@@ -68,13 +85,20 @@ async def _run_ingestion(year: int) -> None:
             rates=RateRepository(database),
             runs=IngestionRepository(database),
         )
-        result = await service.run(year)
+        results = [
+            await service.run(target_year, allow_empty=allow_empty)
+            for target_year, allow_empty in ingestion_targets(
+                year,
+                today=datetime.now(UTC).date(),
+            )
+        ]
     finally:
         await database.close()
-    print(
-        f"Ingestion {result.status}: {result.rows_upserted}/{result.rows_fetched} rates "
-        f"stored for {result.year}; run_id={result.id}"
-    )
+    for result in results:
+        print(
+            f"Ingestion {result.status}: {result.rows_upserted}/{result.rows_fetched} rates "
+            f"stored for {result.year}; run_id={result.id}"
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> None:

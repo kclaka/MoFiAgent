@@ -6,7 +6,11 @@ import pytest
 from mofiagent.api.app import create_app
 from mofiagent.api.models import QuestionResponse
 from mofiagent.application import QuestionProcessingError
-from mofiagent.rates.repository import SessionBusyError, SessionNotFoundError
+from mofiagent.rates.repository import (
+    SessionBusyError,
+    SessionCompletion,
+    SessionNotFoundError,
+)
 
 
 class StubQuestionService:
@@ -121,6 +125,41 @@ async def test_questions_hide_processing_failures() -> None:
 
     assert response.status_code == 503
     assert response.json() == {"detail": "question could not be answered"}
+
+
+@pytest.mark.asyncio
+async def test_questions_return_session_metadata_for_failed_fifth_attempt() -> None:
+    error = QuestionProcessingError(
+        "internal detail",
+        completion=SessionCompletion(
+            session_id=UUID("00000000-0000-0000-0000-000000000010"),
+            turn_number=5,
+            status="closed",
+            next_session_id=UUID("00000000-0000-0000-0000-000000000011"),
+        ),
+    )
+    app = create_app(
+        initialize_dependencies=False,
+        question_service=StubQuestionService(error=error),
+    )
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/questions",
+            json={"question": "What is the 10-year yield?"},
+        )
+
+    assert response.status_code == 503
+    assert response.headers["x-mofi-session-status"] == "closed"
+    assert response.headers["x-mofi-turn-number"] == "5"
+    assert response.headers["x-mofi-next-session-id"] == ("00000000-0000-0000-0000-000000000011")
+    assert response.json() == {
+        "detail": "question could not be answered",
+        "session_id": "00000000-0000-0000-0000-000000000010",
+        "turn_number": 5,
+        "session_status": "closed",
+        "next_session_id": "00000000-0000-0000-0000-000000000011",
+    }
 
 
 @pytest.mark.asyncio

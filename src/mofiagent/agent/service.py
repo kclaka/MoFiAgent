@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -15,6 +16,10 @@ from mofiagent.agent.tools import result_dates, result_source_urls
 UNSUPPORTED_ANSWER = (
     "I can answer questions about official nominal U.S. Treasury yields for supported tenors, "
     "including latest values, historical values, changes, and curve spreads."
+)
+UNAVAILABLE_ANSWER = (
+    "I couldn't retrieve a matching official Treasury observation for that question. "
+    "Try another supported tenor or date."
 )
 
 
@@ -55,11 +60,13 @@ class AgentService:
         records: list[ToolCallRecord] = []
         successful_payloads: list[dict[str, object]] = []
 
-        for _ in range(self._max_rounds):
+        for round_number in range(self._max_rounds):
             if turn.tool_calls:
                 if len(records) + len(turn.tool_calls) > self._max_tool_calls:
                     raise AgentExhaustedError("model exceeded the tool-call budget")
-                results = [await self._tools.execute(call) for call in turn.tool_calls]
+                results = await asyncio.gather(
+                    *(self._tools.execute(call) for call in turn.tool_calls)
+                )
                 for call, result in zip(turn.tool_calls, results, strict=True):
                     records.append(
                         ToolCallRecord(
@@ -70,10 +77,18 @@ class AgentService:
                     )
                     if result.ok:
                         successful_payloads.append(result.payload)
+                if round_number == self._max_rounds - 1:
+                    raise AgentExhaustedError("model exceeded the agent-round budget")
                 turn = await session.continue_with(results)
                 continue
 
             if not successful_payloads:
+                if records:
+                    return AgentResult(
+                        answer=UNAVAILABLE_ANSWER,
+                        status="unavailable",
+                        tool_calls=records,
+                    )
                 return AgentResult(
                     answer=UNSUPPORTED_ANSWER,
                     status="unsupported",
@@ -94,5 +109,4 @@ class AgentService:
                 data_as_of=max(dates) if dates else None,
                 source_urls=sorted(source_urls),
             )
-
-        raise AgentExhaustedError("model exceeded the agent-round budget")
+        raise AssertionError("agent loop exited without returning")
